@@ -32,21 +32,20 @@ const saving = ref(false)
 const err = ref('')
 
 const roster = ref<PlayerRow[]>([])
+const rosterLoading = ref(true)
 const playerSearch = ref('')
-/** null = elegí opción; 'generic' = ficha numerada; string = id de jugador */
-const placementChoice = ref<null | 'generic' | string>(null)
 const rosterErr = ref('')
 
-const filteredRoster = computed(() => {
-  const q = playerSearch.value.trim().toLowerCase()
-  if (!q) return roster.value
-  return roster.value.filter((p) => p.full_name.toLowerCase().includes(q))
+const playersNotOnBoard = computed(() => {
+  const ids = new Set(state.value.markers.map((m) => m.player_id).filter(Boolean) as string[])
+  return roster.value.filter((p) => !ids.has(p.id))
 })
 
-const selectedPlayer = computed(() => {
-  const id = placementChoice.value
-  if (!id || id === 'generic') return null
-  return roster.value.find((p) => p.id === id) ?? null
+const filteredPlayersNotOnBoard = computed(() => {
+  const q = playerSearch.value.trim().toLowerCase()
+  const list = playersNotOnBoard.value
+  if (!q) return list
+  return list.filter((p) => p.full_name.toLowerCase().includes(q))
 })
 
 let stage: Konva.Stage | null = null
@@ -120,18 +119,8 @@ function markerLabelColor(fill: string): string {
   return '#ffffff'
 }
 
-function setPlacement(v: null | 'generic' | string) {
-  placementChoice.value = v
-}
-
-function onNativePick(ev: Event) {
-  const v = (ev.target as HTMLSelectElement).value
-  if (v === '') setPlacement(null)
-  else if (v === 'generic') setPlacement('generic')
-  else setPlacement(v)
-}
-
 async function loadRoster() {
+  rosterLoading.value = true
   rosterErr.value = ''
   const { data, error } = await supabase
     .from('players')
@@ -141,9 +130,11 @@ async function loadRoster() {
   if (error) {
     rosterErr.value = error.message
     roster.value = []
+    rosterLoading.value = false
     return
   }
   roster.value = data ?? []
+  rosterLoading.value = false
 }
 
 function clamp(v: number, a: number, b: number) {
@@ -157,8 +148,13 @@ function isInside(r: { x: number; y: number; w: number; h: number }, p: { x: num
 function layoutBenchMarkers() {
   if (!stage) return
   const pad = 10
-  const cell = 44
-  const cols = Math.max(1, Math.floor((benchRect.w - pad * 2) / cell))
+  const labelH = 22
+  const markersOffField = state.value.markers.filter((m) => !isInside(fieldRect, { x: m.x, y: m.y }))
+  const cols = Math.max(1, Math.floor((benchRect.w - pad * 2) / 40))
+  const rows = Math.max(1, Math.ceil(markersOffField.length / cols))
+  const usableH = Math.max(32, benchRect.h - pad * 2 - labelH)
+  const cell = clamp(Math.floor(usableH / rows), 28, 44)
+  const cellW = Math.min(cell, Math.floor((benchRect.w - pad * 2) / cols))
   let i = 0
 
   const nextPos = () => {
@@ -166,8 +162,8 @@ function layoutBenchMarkers() {
     const row = Math.floor(i / cols)
     i++
     return {
-      x: benchRect.x + pad + col * cell + 22,
-      y: benchRect.y + pad + row * cell + 22,
+      x: benchRect.x + pad + col * cellW + cellW / 2,
+      y: benchRect.y + pad + labelH + row * cell + cell / 2,
     }
   }
 
@@ -211,6 +207,31 @@ function ensureRosterTokens() {
   layoutBenchMarkers()
   enforceFieldCap()
   redraw()
+}
+
+function addPlayerMarkerFromRoster(player: PlayerRow) {
+  if (!auth.isAdmin || !stage) return
+  if (state.value.markers.some((m) => m.player_id === player.id)) return
+  snapshot()
+  const lab = initials(player.full_name)
+  const fill = markerHexForPosition(player.primary_position)
+  const numVal =
+    player.shirt_number != null && !Number.isNaN(Number(player.shirt_number))
+      ? Number(player.shirt_number)
+      : nextShirtNum()
+  state.value.markers = [
+    ...state.value.markers,
+    {
+      id: uid(),
+      x: 0,
+      y: 0,
+      num: numVal,
+      fill,
+      player_id: player.id,
+      label: lab,
+    },
+  ]
+  fitStage()
 }
 
 function redraw() {
@@ -368,7 +389,16 @@ function fitStage() {
   const fy = pad
   const fw = w - pad * 2
   const fh = h - pad * 2
-  const benchH = clamp(Math.round(fh * 0.22), 120, 170)
+  const cellEstimate = 40
+  const colsGuess = Math.max(1, Math.floor((fw - 20) / cellEstimate))
+  const nMarkers = Math.max(1, state.value.markers.length)
+  const rowsGuess = Math.max(1, Math.ceil(nMarkers / colsGuess))
+  const labelPad = 26
+  const benchH = clamp(
+    Math.round(Math.max(fh * 0.22, labelPad + pad * 2 + rowsGuess * cellEstimate)),
+    110,
+    Math.round(fh * 0.48),
+  )
   const gap = 10
   const fieldH = Math.max(220, fh - benchH - gap)
   fieldRect = { x: fx, y: fy, w: fw, h: fieldH }
@@ -646,7 +676,7 @@ function removeMarker(markerId: string) {
   if (!auth.isAdmin) return
   snapshot()
   state.value.markers = state.value.markers.filter((m) => m.id !== markerId)
-  redraw()
+  fitStage()
 }
 
 function removeByKindName(fullName: string) {
@@ -685,7 +715,7 @@ function onStageDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent | Pointer
     }
     snapshot()
     state.value.markers = [...state.value.markers, m]
-    redraw()
+    fitStage()
     return
   }
 
@@ -721,7 +751,7 @@ function onStageDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent | Pointer
     if (!nm) return
     snapshot()
     removeByKindName(nm)
-    redraw()
+    fitStage()
   }
 }
 
@@ -824,9 +854,8 @@ watch(zoom, () => {
   stage?.batchDraw()
 })
 
-watch(tool, (v) => {
+watch(tool, () => {
   lineAwait.value = null
-  if (v === 'player') placementChoice.value = null
   redraw()
 })
 
@@ -835,6 +864,21 @@ watch(
   () => {
     void loadBoard()
   },
+)
+
+watch(
+  [
+    () => loading.value,
+    () => rosterLoading.value,
+    () => roster.value.length,
+    () => bid.value,
+  ],
+  () => {
+    if (loading.value || rosterLoading.value || !stage) return
+    ensureRosterTokens()
+    fitStage()
+  },
+  { flush: 'post' },
 )
 </script>
 
@@ -865,15 +909,48 @@ watch(
       <div v-if="auth.isAdmin && tool === 'player'" class="player-panel">
         <p class="panel-hint">
           Herramienta <strong>Genérico</strong>: tocá dentro de la cancha para crear una ficha numérica.
-          Los jugadores del plantel ya están en el <strong>Banco</strong> (arrastrá y soltá).
+          Los jugadores del plantel están en el <strong>Banco</strong> (arrastrá). Si quitaste una ficha, usá
+          <strong>Plantel</strong> abajo para volver a agregarla.
         </p>
       </div>
 
       <div ref="containerEl" class="stage-wrap" />
 
+      <div v-if="auth.isAdmin && !loading" class="roster-panel card">
+        <h3 class="roster-panel-title">Plantel</h3>
+        <p class="muted sm roster-hint">
+          Jugadores sin ficha en este tablero. <strong>Agregar al banco</strong> crea la ficha (iniciales como LM).
+        </p>
+        <p v-if="rosterErr" class="warn sm">{{ rosterErr }}</p>
+        <template v-else-if="rosterLoading">
+          <p class="muted sm">Cargando plantel…</p>
+        </template>
+        <template v-else>
+          <input
+            v-model="playerSearch"
+            type="search"
+            class="search"
+            placeholder="Buscar entre los que faltan…"
+            autocomplete="off"
+          />
+          <p v-if="filteredPlayersNotOnBoard.length === 0" class="muted sm roster-empty">
+            <span v-if="playersNotOnBoard.length === 0">Todos los jugadores del plantel ya tienen ficha en el tablero.</span>
+            <span v-else>Ningún nombre coincide con la búsqueda.</span>
+          </p>
+          <ul v-else class="roster">
+            <li v-for="p in filteredPlayersNotOnBoard" :key="p.id">
+              <button type="button" class="pbtn" @click="addPlayerMarkerFromRoster(p)">
+                <span class="pname">{{ p.full_name }}</span>
+                <span class="meta">Agregar al banco</span>
+              </button>
+            </li>
+          </ul>
+        </template>
+      </div>
+
       <div v-if="auth.isAdmin && state.markers.length > 0" class="chips-panel card">
-        <h3 class="chips-title">Fichas en la cancha</h3>
-        <p class="muted sm chips-sub">Podés quitar desde acá o con la herramienta <strong>Borrar</strong>.</p>
+        <h3 class="chips-title">Fichas del tablero</h3>
+        <p class="muted sm chips-sub">Cancha y banco. Podés quitar desde acá o con la herramienta <strong>Borrar</strong>.</p>
         <ul class="chips-list">
           <li v-for="m in state.markers" :key="m.id" class="chip-row">
             <span class="chip-name">{{ markerTitle(m) }}</span>
@@ -963,6 +1040,33 @@ watch(
 .field-cap {
   font-size: 0.78rem;
   opacity: 0.85;
+}
+
+.roster-panel {
+  margin: 0 0.75rem 0.5rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-height: 32vh;
+  min-height: 0;
+}
+
+.roster-panel-title {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.roster-hint {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.roster-empty {
+  margin: 0;
 }
 
 .player-panel {
