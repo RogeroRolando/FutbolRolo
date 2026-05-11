@@ -52,9 +52,41 @@ const selectedPlayer = computed(() => {
 let stage: Konva.Stage | null = null
 let layerBg: Konva.Layer | null = null
 let layerDraw: Konva.Layer | null = null
+/** Zoom en grupo (stage scale=1) para que drag/coords coincidan con fieldRect/benchRect */
+let viewportBg: Konva.Group | null = null
+let viewportDraw: Konva.Group | null = null
 let resizeObs: ResizeObserver | null = null
 let fieldRect = { x: 0, y: 0, w: 0, h: 0 }
 let benchRect = { x: 0, y: 0, w: 0, h: 0 }
+
+const MAX_ON_FIELD = 9
+
+function syncViewportZoom() {
+  const z = zoom.value
+  if (!viewportBg || !viewportDraw) return
+  viewportBg.scale({ x: z, y: z })
+  viewportDraw.scale({ x: z, y: z })
+  viewportBg.position({ x: 0, y: 0 })
+  viewportDraw.position({ x: 0, y: 0 })
+}
+
+function countMarkersOnField(excludeId?: string) {
+  return state.value.markers.filter(
+    (mk) => mk.id !== excludeId && isInside(fieldRect, { x: mk.x, y: mk.y }),
+  ).length
+}
+
+/** Fútbol 9: si hay más de 9 en cancha (p. ej. tablero viejo), el excedente va al banco. */
+function enforceFieldCap() {
+  const onField = state.value.markers.filter((m) => isInside(fieldRect, { x: m.x, y: m.y }))
+  if (onField.length <= MAX_ON_FIELD) return
+  snapshot()
+  const toBench = new Set(onField.slice(MAX_ON_FIELD).map((m) => m.id))
+  state.value.markers = state.value.markers.map((m) =>
+    toBench.has(m.id) ? { ...m, x: -1, y: -1 } : m,
+  )
+  layoutBenchMarkers()
+}
 
 function snapshot() {
   const copy = JSON.parse(JSON.stringify(state.value)) as BoardStateV1
@@ -140,7 +172,6 @@ function layoutBenchMarkers() {
   }
 
   const next = state.value.markers.map((m) => {
-    if (!m.player_id) return m
     const insideField = isInside(fieldRect, { x: m.x, y: m.y })
     const insideBench = isInside(benchRect, { x: m.x, y: m.y })
     if (insideField || insideBench) return m
@@ -178,12 +209,13 @@ function ensureRosterTokens() {
   snapshot()
   state.value.markers = [...state.value.markers, ...missing]
   layoutBenchMarkers()
+  enforceFieldCap()
   redraw()
 }
 
 function redraw() {
-  if (!layerDraw || !stage) return
-  layerDraw.destroyChildren()
+  if (!viewportDraw || !layerDraw || !stage) return
+  viewportDraw.destroyChildren()
 
   const catcher = new Konva.Rect({
     x: fieldRect.x,
@@ -194,10 +226,10 @@ function redraw() {
     listening: true,
     name: 'pitch-catcher',
   })
-  layerDraw.add(catcher)
+  viewportDraw.add(catcher)
 
   // Banco (zona de fichas) — invisible, pero útil para hit tests futuros
-  layerDraw.add(
+  viewportDraw.add(
     new Konva.Rect({
       x: benchRect.x,
       y: benchRect.y,
@@ -219,7 +251,7 @@ function redraw() {
       lineJoin: 'round',
       listening: true,
     })
-    layerDraw.add(line)
+    viewportDraw.add(line)
   }
 
   for (const ar of state.value.arrows) {
@@ -233,7 +265,7 @@ function redraw() {
       pointerWidth: 12,
       listening: true,
     })
-    layerDraw.add(arrow)
+    viewportDraw.add(arrow)
   }
 
   for (const m of state.value.markers) {
@@ -274,14 +306,21 @@ function redraw() {
       if (!auth.isAdmin) return
       const xRaw = g.x()
       const yRaw = g.y()
+      const wasOnField = isInside(fieldRect, { x: m.x, y: m.y })
       const inBench = isInside(benchRect, { x: xRaw, y: yRaw })
       const inField = isInside(fieldRect, { x: xRaw, y: yRaw })
-      const x = inBench
+      let x = inBench
         ? clamp(xRaw, benchRect.x + 18, benchRect.x + benchRect.w - 18)
         : clamp(xRaw, fieldRect.x + 18, fieldRect.x + fieldRect.w - 18)
-      const y = inBench
+      let y = inBench
         ? clamp(yRaw, benchRect.y + 18, benchRect.y + benchRect.h - 18)
         : clamp(yRaw, fieldRect.y + 18, fieldRect.y + fieldRect.h - 18)
+      const willBeOnField = isInside(fieldRect, { x, y })
+      if (willBeOnField && !wasOnField && countMarkersOnField(m.id) >= MAX_ON_FIELD) {
+        g.position({ x: m.x, y: m.y })
+        g.getLayer()?.batchDraw()
+        return
+      }
       snapshot()
       state.value.markers = state.value.markers.map((mk) =>
         mk.id === m.id ? { ...mk, x, y } : mk,
@@ -293,7 +332,7 @@ function redraw() {
       redraw()
     })
 
-    layerDraw.add(g)
+    viewportDraw.add(g)
   }
 
   layerDraw.batchDraw()
@@ -313,8 +352,16 @@ function fitStage() {
   const h = Math.min(Math.max(460, window.innerHeight * 0.62), w * 1.55)
   stage.width(w)
   stage.height(h)
-  if (!layerBg) return
+  if (!layerBg || !layerDraw) return
   layerBg.destroyChildren()
+  viewportBg = new Konva.Group({ listening: false })
+  layerBg.add(viewportBg)
+
+  if (!viewportDraw || viewportDraw.getLayer() !== layerDraw) {
+    layerDraw.destroyChildren()
+    viewportDraw = new Konva.Group()
+    layerDraw.add(viewportDraw)
+  }
 
   const pad = 10
   const fx = pad
@@ -342,7 +389,7 @@ function fitStage() {
     cornerRadius: 10,
     listening: false,
   })
-  layerBg.add(field)
+  viewportBg.add(field)
 
   // Fútbol 9 — proporciones orientativas (arcos a izquierda y derecha, línea medial vertical)
   const penDepth = fieldRect.w * 0.16
@@ -356,7 +403,7 @@ function fitStage() {
   const goalMouthY = fieldRect.y + (fieldRect.h - goalMouthH) / 2
 
   // Porterías (boca de gol oscura)
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x,
       y: goalMouthY,
@@ -368,7 +415,7 @@ function fitStage() {
       listening: false,
     }),
   )
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x + fieldRect.w - goalMouthW,
       y: goalMouthY,
@@ -382,7 +429,7 @@ function fitStage() {
   )
 
   // Área chica (meta)
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x,
       y: goalY,
@@ -393,7 +440,7 @@ function fitStage() {
       listening: false,
     }),
   )
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x + fieldRect.w - goalDepth,
       y: goalY,
@@ -406,7 +453,7 @@ function fitStage() {
   )
 
   // Área grande (penalti)
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x,
       y: penY,
@@ -417,7 +464,7 @@ function fitStage() {
       listening: false,
     }),
   )
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: fieldRect.x + fieldRect.w - penDepth,
       y: penY,
@@ -432,7 +479,7 @@ function fitStage() {
   // Punto de penalti
   const spotR = Math.max(2.5, Math.min(fieldRect.w, fieldRect.h) * 0.012)
   const spotOff = penDepth * 0.72
-  layerBg.add(
+  viewportBg.add(
     new Konva.Circle({
       x: fieldRect.x + spotOff,
       y: fieldRect.y + fieldRect.h / 2,
@@ -441,7 +488,7 @@ function fitStage() {
       listening: false,
     }),
   )
-  layerBg.add(
+  viewportBg.add(
     new Konva.Circle({
       x: fieldRect.x + fieldRect.w - spotOff,
       y: fieldRect.y + fieldRect.h / 2,
@@ -463,7 +510,7 @@ function fitStage() {
     strokeWidth: lineW,
     listening: false,
   })
-  layerBg.add(mid)
+  viewportBg.add(mid)
 
   const circle = new Konva.Ellipse({
     x: fieldRect.x + fieldRect.w / 2,
@@ -474,10 +521,10 @@ function fitStage() {
     strokeWidth: lineW,
     listening: false,
   })
-  layerBg.add(circle)
+  viewportBg.add(circle)
 
   // Banco (zona inferior)
-  layerBg.add(
+  viewportBg.add(
     new Konva.Rect({
       x: benchRect.x,
       y: benchRect.y,
@@ -490,7 +537,7 @@ function fitStage() {
       listening: false,
     }),
   )
-  layerBg.add(
+  viewportBg.add(
     new Konva.Text({
       x: benchRect.x + 12,
       y: benchRect.y + 10,
@@ -501,8 +548,10 @@ function fitStage() {
     }),
   )
 
+  syncViewportZoom()
   layerBg.batchDraw()
   layoutBenchMarkers()
+  enforceFieldCap()
   redraw()
 }
 
@@ -515,6 +564,10 @@ function resolvePointer(
     stage.setPointersPositions(e)
   } catch {
     /* Konva viejo / edge */
+  }
+  const relVp = viewportDraw?.getRelativePointerPosition()
+  if (relVp && Number.isFinite(relVp.x) && Number.isFinite(relVp.y)) {
+    return { x: relVp.x, y: relVp.y }
   }
   const rel = stage.getRelativePointerPosition()
   if (rel && Number.isFinite(rel.x) && Number.isFinite(rel.y)) {
@@ -619,6 +672,7 @@ function onStageDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent | Pointer
   if (tool.value === 'player') {
     // Herramienta: ficha genérica (solo número) al tocar la cancha
     if (!isInside(fieldRect, pos)) return
+    if (countMarkersOnField() >= MAX_ON_FIELD) return
     const n = nextShirtNum()
     const m: BoardMarker = {
       id: uid(),
@@ -678,6 +732,8 @@ function destroyKonva() {
   stage = null
   layerBg = null
   layerDraw = null
+  viewportBg = null
+  viewportDraw = null
 }
 
 function initKonva() {
@@ -763,11 +819,9 @@ onBeforeUnmount(() => {
   destroyKonva()
 })
 
-watch(zoom, (z) => {
-  if (!stage) return
-  stage.scale({ x: z, y: z })
-  stage.position({ x: 0, y: 0 })
-  stage.batchDraw()
+watch(zoom, () => {
+  syncViewportZoom()
+  stage?.batchDraw()
 })
 
 watch(tool, (v) => {
@@ -833,6 +887,7 @@ watch(
         <button type="button" class="btn" @click="zoom = Math.max(0.6, Math.round((zoom - 0.1) * 10) / 10)">−</button>
         <span>{{ Math.round(zoom * 100) }}%</span>
         <button type="button" class="btn" @click="zoom = Math.min(1.5, Math.round((zoom + 0.1) * 10) / 10)">+</button>
+        <span class="field-cap">Máx. 9 en cancha</span>
       </div>
     </template>
     <p v-else class="err">{{ err }}</p>
@@ -899,9 +954,15 @@ watch(
   align-items: center;
   justify-content: center;
   gap: 0.75rem;
+  flex-wrap: wrap;
   padding: 0.25rem 0.75rem 0.75rem;
   font-size: 0.9rem;
   color: var(--muted);
+}
+
+.field-cap {
+  font-size: 0.78rem;
+  opacity: 0.85;
 }
 
 .player-panel {

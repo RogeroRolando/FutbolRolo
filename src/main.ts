@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
 import { useAuthStore } from './stores/auth'
+import { isSupabaseConfigured } from './lib/supabase'
 import './assets/main.css'
 
 function showBootError(message: string) {
@@ -23,11 +24,9 @@ const app = createApp(App)
 const pinia = createPinia()
 app.use(pinia)
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY
-if (!url || !key) {
+if (!isSupabaseConfigured()) {
   showBootError(
-    'Faltan variables de entorno en el build (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).',
+    'Faltan o son inválidas VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY en el build. Revisá en Vercel que la URL sea https://….supabase.co (sin espacios ni comillas) y que la Publishable key esté completa. Luego Redeploy.',
   )
 } else {
   try {
