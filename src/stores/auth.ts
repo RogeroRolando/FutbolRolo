@@ -39,19 +39,26 @@ export const useAuthStore = defineStore('auth', () => {
     if (initPromise) return initPromise
     initPromise = (async () => {
       loading.value = true
-      const { data } = await supabase.auth.getSession()
-      user.value = data.session?.user ?? null
-      await refreshProfile()
+      try {
+        const { data } = await supabase.auth.getSession()
+        user.value = data.session?.user ?? null
+        await refreshProfile()
 
-      if (!listenerRegistered) {
-        listenerRegistered = true
-        supabase.auth.onAuthStateChange(async (_evt, session) => {
-          user.value = session?.user ?? null
-          await refreshProfile()
-        })
+        if (!listenerRegistered) {
+          listenerRegistered = true
+          supabase.auth.onAuthStateChange(async (_evt, session) => {
+            user.value = session?.user ?? null
+            await refreshProfile()
+          })
+        }
+      } catch (e) {
+        console.error('[Rolo Futbol] Error al iniciar sesión de Supabase:', e)
+        user.value = null
+        displayName.value = null
+        role.value = null
+      } finally {
+        loading.value = false
       }
-
-      loading.value = false
     })()
     return initPromise
   }
