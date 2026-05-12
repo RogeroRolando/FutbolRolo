@@ -47,8 +47,20 @@ export const useAuthStore = defineStore('auth', () => {
         if (!listenerRegistered) {
           listenerRegistered = true
           supabase.auth.onAuthStateChange(async (_evt, session) => {
+            const hadUser = user.value !== null
             user.value = session?.user ?? null
             await refreshProfile()
+
+            if (!session?.user && hadUser) {
+              initPromise = null
+              const { default: r } = await import('@/router')
+              if (r.currentRoute.value.name !== 'login') {
+                await r.replace({
+                  name: 'login',
+                  query: { redirect: r.currentRoute.value.fullPath },
+                })
+              }
+            }
           })
         }
       } catch (e) {

@@ -14,6 +14,12 @@ const mode = ref<'login' | 'register'>('login')
 const error = ref('')
 const pending = ref(false)
 
+function safeRedirectPath(raw: unknown): string {
+  if (typeof raw !== 'string' || raw.length === 0) return '/jugadores'
+  if (!raw.startsWith('/') || raw.startsWith('//')) return '/jugadores'
+  return raw
+}
+
 async function submit() {
   error.value = ''
   pending.value = true
@@ -23,7 +29,7 @@ async function submit() {
     } else {
       await auth.signIn(email.value.trim(), password.value)
     }
-    const redir = (route.query.redirect as string) || '/jugadores'
+    const redir = safeRedirectPath(route.query.redirect)
     await router.replace(redir)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'Error de autenticación'
