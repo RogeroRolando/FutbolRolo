@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RouterView, useRoute, useRouter } from 'vue-router'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 import BottomNav from '@/components/BottomNav.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -28,9 +28,32 @@ function goBack() {
   router.back()
 }
 
+function onAppVisibility() {
+  if (document.visibilityState === 'visible' && auth.user) {
+    void auth.refreshProfile()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', onAppVisibility)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onAppVisibility)
+})
+
 async function logout() {
-  await auth.signOut()
-  router.push({ name: 'login' })
+  try {
+    await auth.signOut()
+  } catch (e) {
+    console.error('[Rolo Futbol] signOut:', e)
+  }
+  try {
+    await router.replace({ name: 'login' })
+  } catch (e) {
+    console.error('[Rolo Futbol] router.replace login:', e)
+    window.location.assign('/login')
+  }
 }
 </script>
 
@@ -52,7 +75,7 @@ async function logout() {
         type="button"
         class="icon-btn btn-ghost"
         aria-label="Cerrar sesión"
-        @click="logout"
+        @click.stop.prevent="logout"
       >
         Salir
       </button>

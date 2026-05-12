@@ -2,6 +2,7 @@
 import Konva from 'konva'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import type { RealtimeChannel } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/auth'
 import type { Json, PlayerRow } from '@/types/database'
@@ -30,6 +31,11 @@ const lineAwait = ref<{ x: number; y: number } | null>(null)
 const loading = ref(true)
 const saving = ref(false)
 const err = ref('')
+
+/** ISO del servidor; evita pisar con datos viejos y detecta cambios desde otro dispositivo */
+let lastSyncedAt = ''
+let boardRealtime: RealtimeChannel | null = null
+let boardVisTimer: ReturnType<typeof setTimeout> | null = null
 
 const roster = ref<PlayerRow[]>([])
 const rosterLoading = ref(true)
@@ -798,6 +804,51 @@ function initKonva() {
   fitStage()
 }
 
+function teardownBoardRealtime() {
+  if (boardRealtime) {
+    void supabase.removeChannel(boardRealtime)
+    boardRealtime = null
+  }
+}
+
+function setupBoardRealtime() {
+  teardownBoardRealtime()
+  const id = bid.value
+  if (!id) return
+  boardRealtime = supabase
+    .channel(`tactical_board:${id}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'tactical_boards',
+        filter: `id=eq.${id}`,
+      },
+      (payload) => {
+        if (saving.value) return
+        const row = payload.new as { updated_at?: string; konva_json?: unknown; name?: string }
+        if (!row?.updated_at || row.updated_at <= lastSyncedAt) return
+        void applyRemoteBoardRow(row as { updated_at: string; konva_json: unknown; name: string })
+      },
+    )
+    .subscribe()
+}
+
+async function applyRemoteBoardRow(row: { updated_at: string; konva_json: unknown; name: string }) {
+  lastSyncedAt = row.updated_at
+  boardName.value = row.name
+  state.value = parseBoard(row.konva_json)
+  history.value = []
+  await nextTick()
+  initKonva()
+  requestAnimationFrame(() => {
+    fitStage()
+    stage?.batchDraw()
+    ensureRosterTokens()
+  })
+}
+
 async function loadBoard() {
   loading.value = true
   err.value = ''
@@ -811,6 +862,7 @@ async function loadBoard() {
     err.value = error?.message ?? 'No encontrado'
     return
   }
+  lastSyncedAt = typeof data.updated_at === 'string' ? data.updated_at : ''
   boardName.value = data.name
   state.value = parseBoard(data.konva_json)
   history.value = []
@@ -823,11 +875,36 @@ async function loadBoard() {
   })
 }
 
+async function refreshBoardIfNewer() {
+  if (!bid.value || saving.value || loading.value) return
+  const { data, error } = await supabase
+    .from('tactical_boards')
+    .select('name, konva_json, updated_at')
+    .eq('id', bid.value)
+    .single()
+  if (error || !data?.updated_at) return
+  if (data.updated_at <= lastSyncedAt) return
+  await applyRemoteBoardRow({
+    updated_at: data.updated_at,
+    konva_json: data.konva_json,
+    name: data.name,
+  })
+}
+
+function onBoardVisibility() {
+  if (document.visibilityState !== 'visible') return
+  if (boardVisTimer) clearTimeout(boardVisTimer)
+  boardVisTimer = setTimeout(() => {
+    boardVisTimer = null
+    void refreshBoardIfNewer()
+  }, 400)
+}
+
 async function save() {
   if (!auth.isAdmin) return
   saving.value = true
   err.value = ''
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('tactical_boards')
     .update({
       name: boardName.value.trim() || 'Diagrama',
@@ -836,16 +913,30 @@ async function save() {
       updated_at: new Date().toISOString(),
     })
     .eq('id', bid.value)
+    .select('updated_at')
+    .single()
   saving.value = false
-  if (error) err.value = error.message
+  if (error) {
+    err.value = error.message
+    return
+  }
+  if (data?.updated_at) lastSyncedAt = data.updated_at
 }
 
 onMounted(() => {
   void loadRoster()
-  void loadBoard()
+  void (async () => {
+    await loadBoard()
+    setupBoardRealtime()
+  })()
+  document.addEventListener('visibilitychange', onBoardVisibility)
 })
 
 onBeforeUnmount(() => {
+  if (boardVisTimer) clearTimeout(boardVisTimer)
+  boardVisTimer = null
+  document.removeEventListener('visibilitychange', onBoardVisibility)
+  teardownBoardRealtime()
   destroyKonva()
 })
 
@@ -862,7 +953,11 @@ watch(tool, () => {
 watch(
   () => bid.value,
   () => {
-    void loadBoard()
+    void (async () => {
+      teardownBoardRealtime()
+      await loadBoard()
+      setupBoardRealtime()
+    })()
   },
 )
 
