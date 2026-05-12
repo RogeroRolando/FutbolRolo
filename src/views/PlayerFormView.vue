@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { supabase } from '@/lib/supabase'
 import type { PlayerRow } from '@/types/database'
@@ -15,6 +15,7 @@ const full_name = ref('')
 const birth_date = ref('')
 const phone = ref('')
 const primary_position = ref('DEF')
+const secondary_positions = ref<string[]>([])
 const foot = ref<'derecha' | 'izquierda' | 'ambas' | ''>('')
 const strengths = ref('')
 const weaknesses = ref('')
@@ -40,6 +41,9 @@ function apply(p: PlayerRow) {
   birth_date.value = p.birth_date ?? ''
   phone.value = p.phone ?? ''
   primary_position.value = p.primary_position
+  secondary_positions.value = [...(p.secondary_positions ?? [])].filter(
+    (c) => c !== p.primary_position && c !== 'OTRO',
+  )
   foot.value = p.foot ?? ''
   strengths.value = p.strengths ?? ''
   weaknesses.value = p.weaknesses ?? ''
@@ -48,6 +52,10 @@ function apply(p: PlayerRow) {
   shirt_number.value = p.shirt_number
   archived.value = p.archived
 }
+
+watch(primary_position, (pos) => {
+  secondary_positions.value = secondary_positions.value.filter((c) => c !== pos)
+})
 
 async function save() {
   err.value = ''
@@ -61,6 +69,9 @@ async function save() {
     birth_date: birth_date.value || null,
     phone: phone.value.trim() || null,
     primary_position: primary_position.value,
+    secondary_positions: secondary_positions.value.filter(
+      (c) => c !== primary_position.value && ['ARQ', 'DEF', 'VOL', 'DEL'].includes(c),
+    ),
     foot: foot.value === '' ? null : foot.value,
     strengths: strengths.value.trim() || null,
     weaknesses: weaknesses.value.trim() || null,
@@ -104,6 +115,16 @@ async function save() {
         <option v-for="p in POSITIONS" :key="p" :value="p">{{ p }}</option>
       </select>
     </div>
+    <fieldset class="field sec-pos">
+      <legend>Posiciones alternativas</legend>
+      <p class="hint">En la pizarra suman menos que la posición natural si coinciden con la zona.</p>
+      <div class="pos-chips">
+        <label v-for="c in ['ARQ', 'DEF', 'VOL', 'DEL']" :key="c" class="chk">
+          <input v-model="secondary_positions" type="checkbox" :value="c" />
+          {{ c }}
+        </label>
+      </div>
+    </fieldset>
     <div class="field">
       <label for="foot">Pierna hábil</label>
       <select id="foot" v-model="foot">
@@ -175,5 +196,37 @@ async function save() {
 
 .check input {
   margin-top: 0.2rem;
+}
+
+.sec-pos {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  margin: 0;
+}
+
+.sec-pos legend {
+  font-size: 0.85rem;
+  padding: 0 0.35rem;
+}
+
+.hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.pos-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  cursor: pointer;
 }
 </style>

@@ -34,6 +34,9 @@ if (!isSupabaseConfigured()) {
     await auth.init()
     app.use(router)
     app.mount('#app')
+    if (import.meta.env.PROD) {
+      console.info('[Rolo Futbol] build', __BUILD_TIME__)
+    }
   } catch (e) {
     console.error(e)
     showBootError(e instanceof Error ? e.message : 'Error desconocido al arrancar.')

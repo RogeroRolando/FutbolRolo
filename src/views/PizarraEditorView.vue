@@ -6,19 +6,21 @@ import type { RealtimeChannel } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/stores/auth'
 import type { Json, PlayerRow } from '@/types/database'
+import type { BoardMarker, BoardStateV1 } from '@/types/board'
+import { emptyBoard, parseBoard } from '@/types/board'
 import { initials, markerHexForPosition } from '@/lib/positions'
 import {
-  emptyBoard,
-  parseBoard,
-  type BoardMarker,
-  type BoardStateV1,
-} from '@/types/board'
+  computeTeamBoardRating,
+} from '@/lib/pizarra-rating'
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
 const auth = useAuthStore()
 
 const bid = computed(() => props.id || (route.params.id as string))
+
+/** ISO del último `vite build`; si en producción no cambia al redeployar, el sitio sirve un bundle viejo. */
+const buildStampShort = __BUILD_TIME__.slice(0, 16)
 
 const containerEl = ref<HTMLDivElement | null>(null)
 const boardName = ref('')
@@ -52,6 +54,46 @@ const filteredPlayersNotOnBoard = computed(() => {
   const list = playersNotOnBoard.value
   if (!q) return list
   return list.filter((p) => p.full_name.toLowerCase().includes(q))
+})
+
+/** Copia del rect verde de Konva para posicionar el overlay HTML (Konva.Text fallaba en algunos navegadores). */
+const pitchFieldRect = ref({ x: 0, y: 0, w: 0, h: 0 })
+
+function syncPitchFieldRectFromKonva() {
+  if (fieldRect.w > 0 && fieldRect.h > 0) {
+    pitchFieldRect.value = { x: fieldRect.x, y: fieldRect.y, w: fieldRect.w, h: fieldRect.h }
+  }
+}
+
+const pitchBoardRating = computed(() => {
+  const fr = pitchFieldRect.value
+  if (!fr.w || !fr.h) return { squadOvr: 0, chemistry: 0, hasPlayers: false }
+  const t = computeTeamBoardRating(state.value.markers, roster.value, fr)
+  return {
+    squadOvr: t.squadOvr,
+    chemistry: t.chemistry,
+    hasPlayers: t.players.length > 0,
+  }
+})
+
+/** Esquina inferior izquierda del verde (arco local), coords × zoom = píxeles sobre el canvas. */
+const ratingPillBox = computed(() => {
+  const fr = pitchFieldRect.value
+  const z = zoom.value
+  if (!fr.w || !fr.h) return null
+  const pad = 8
+  const bh = 56
+  const bw = 78
+  const gx = fr.x + pad
+  const gy = fr.y + fr.h - bh - pad
+  return {
+    left: gx * z,
+    top: gy * z,
+    w: bw * z,
+    h: bh * z,
+    fsOvr: Math.max(18, Math.round(26 * z)),
+    fsChem: Math.max(10, Math.round(12 * z)),
+  }
 })
 
 let stage: Konva.Stage | null = null
@@ -456,6 +498,8 @@ function redraw() {
     viewportDraw.add(arrow)
   }
 
+  syncPitchFieldRectFromKonva()
+
   layerDraw.batchDraw()
 }
 
@@ -522,6 +566,8 @@ function fitStage() {
 
   fieldRect = newField
   benchRect = newBench
+  /** Producción: Vue recibe el rect antes del redraw largo (evita pastilla sin medidas). */
+  syncPitchFieldRectFromKonva()
 
   const lineCol = 'rgba(255,255,255,0.72)'
   const lineSoft = 'rgba(255,255,255,0.55)'
@@ -960,11 +1006,13 @@ async function applyRemoteBoardRow(row: { updated_at: string; konva_json: unknow
   history.value = []
   prevRectsInitialized = false
   await nextTick()
+  await nextTick()
   initKonva()
   requestAnimationFrame(() => {
     fitStage()
     stage?.batchDraw()
     ensureRosterTokens()
+    void nextTick(() => syncPitchFieldRectFromKonva())
   })
 }
 
@@ -987,11 +1035,13 @@ async function loadBoard() {
   history.value = []
   prevRectsInitialized = false
   await nextTick()
+  await nextTick()
   initKonva()
   requestAnimationFrame(() => {
     fitStage()
     stage?.batchDraw()
     ensureRosterTokens()
+    void nextTick(() => syncPitchFieldRectFromKonva())
   })
 }
 
@@ -1096,6 +1146,7 @@ watch(
     if (loading.value || rosterLoading.value || !stage) return
     ensureRosterTokens()
     fitStage()
+    void nextTick(() => syncPitchFieldRectFromKonva())
   },
   { flush: 'post' },
 )
@@ -1133,7 +1184,28 @@ watch(
         </p>
       </div>
 
-      <div ref="containerEl" class="stage-wrap" />
+      <div class="stage-shell">
+        <div ref="containerEl" class="stage-wrap" />
+        <div
+          v-if="ratingPillBox"
+          class="rating-pill"
+          :style="{
+            left: `${ratingPillBox.left}px`,
+            top: `${ratingPillBox.top}px`,
+            width: `${ratingPillBox.w}px`,
+            height: `${ratingPillBox.h}px`,
+          }"
+          aria-hidden="true"
+        >
+          <span class="rating-pill-ovr" :style="{ fontSize: `${ratingPillBox.fsOvr}px` }">{{
+            pitchBoardRating.hasPlayers ? pitchBoardRating.squadOvr : '—'
+          }}</span>
+          <span class="rating-pill-lab">VAL</span>
+          <span class="rating-pill-chem" :style="{ fontSize: `${ratingPillBox.fsChem}px` }"
+            >Q {{ pitchBoardRating.hasPlayers ? pitchBoardRating.chemistry : '—' }}</span
+          >
+        </div>
+      </div>
 
       <div v-if="auth.isAdmin && !loading" class="roster-panel card">
         <h3 class="roster-panel-title">Plantel</h3>
@@ -1184,6 +1256,9 @@ watch(
         <span>{{ Math.round(zoom * 100) }}%</span>
         <button type="button" class="btn" @click="zoom = Math.min(1.5, Math.round((zoom + 0.1) * 10) / 10)">+</button>
         <span class="field-cap">Máx. 9 en cancha</span>
+        <span class="build-stamp" :title="'Build ' + buildStampShort + ' (UTC). Debe renovarse tras cada deploy.'">{{
+          buildStampShort
+        }}</span>
       </div>
     </template>
     <p v-else class="err">{{ err }}</p>
@@ -1234,7 +1309,18 @@ watch(
   color: var(--accent);
 }
 
+.stage-shell {
+  position: relative;
+  width: 100%;
+  margin: 0 0.75rem;
+  align-self: center;
+  max-width: 720px;
+  isolation: isolate;
+}
+
 .stage-wrap {
+  position: relative;
+  z-index: 0;
   width: 100%;
   min-width: 0;
   min-height: min(420px, 55dvh);
@@ -1243,6 +1329,45 @@ watch(
   border-radius: 10px;
   border: 1px solid var(--border);
   overflow: hidden;
+}
+
+.rating-pill {
+  position: absolute;
+  z-index: 20;
+  transform: translate3d(0, 0, 0);
+  pointer-events: none;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.05rem;
+  padding: 2px 4px;
+  background: rgba(6, 8, 12, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+}
+
+.rating-pill-ovr {
+  font-weight: 900;
+  line-height: 1;
+  color: #f8fafc;
+  letter-spacing: -0.03em;
+}
+
+.rating-pill-lab {
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: rgba(255, 255, 255, 0.45);
+  text-transform: uppercase;
+}
+
+.rating-pill-chem {
+  font-weight: 700;
+  color: #86efac;
+  line-height: 1.1;
 }
 
 .zoom {
@@ -1259,6 +1384,14 @@ watch(
 .field-cap {
   font-size: 0.78rem;
   opacity: 0.85;
+}
+
+.build-stamp {
+  margin-left: 0.35rem;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  opacity: 0.65;
 }
 
 .roster-panel {

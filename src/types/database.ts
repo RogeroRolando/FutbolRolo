@@ -43,6 +43,7 @@ export interface Database {
           rating: number | null
           rating_updated_at: string | null
           shirt_number: number | null
+          secondary_positions: string[]
           archived: boolean
           created_at: string
           updated_at: string
@@ -60,6 +61,7 @@ export interface Database {
           rating?: number | null
           rating_updated_at?: string | null
           shirt_number?: number | null
+          secondary_positions?: string[]
           archived?: boolean
           created_at?: string
           updated_at?: string
