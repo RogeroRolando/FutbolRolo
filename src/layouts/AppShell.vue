@@ -2,6 +2,7 @@
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import BottomNav from '@/components/BottomNav.vue'
+import { goToLoginPage } from '@/lib/login-nav'
 import { useAuthStore } from '@/stores/auth'
 
 const route = useRoute()
@@ -48,12 +49,7 @@ async function logout() {
   } catch (e) {
     console.error('[Rolo Futbol] signOut:', e)
   }
-  try {
-    await router.replace({ name: 'login' })
-  } catch (e) {
-    console.error('[Rolo Futbol] router.replace login:', e)
-    window.location.assign('/login')
-  }
+  goToLoginPage()
 }
 </script>
 
@@ -75,7 +71,7 @@ async function logout() {
         type="button"
         class="icon-btn btn-ghost"
         aria-label="Cerrar sesión"
-        @click.stop.prevent="logout"
+        @click.stop="logout"
       >
         Salir
       </button>

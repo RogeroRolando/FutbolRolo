@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { User } from '@supabase/supabase-js'
+import { goToLoginPage } from '@/lib/login-nav'
 import { supabase } from '@/lib/supabase'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -53,12 +54,8 @@ export const useAuthStore = defineStore('auth', () => {
 
             if (!session?.user && hadUser) {
               initPromise = null
-              const { default: r } = await import('@/router')
-              if (r.currentRoute.value.name !== 'login') {
-                await r.replace({
-                  name: 'login',
-                  query: { redirect: r.currentRoute.value.fullPath },
-                })
+              if (typeof window !== 'undefined') {
+                goToLoginPage(window.location.pathname + window.location.search)
               }
             }
           })
