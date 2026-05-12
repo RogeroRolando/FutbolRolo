@@ -63,8 +63,64 @@ let viewportDraw: Konva.Group | null = null
 let resizeObs: ResizeObserver | null = null
 let fieldRect = { x: 0, y: 0, w: 0, h: 0 }
 let benchRect = { x: 0, y: 0, w: 0, h: 0 }
+/** Remapeo al redimensionar (PC ↔ móvil) */
+let prevFieldRect = { x: 0, y: 0, w: 0, h: 0 }
+let prevBenchRect = { x: 0, y: 0, w: 0, h: 0 }
+let prevRectsInitialized = false
 
 const MAX_ON_FIELD = 9
+
+type LayoutRect = { x: number; y: number; w: number; h: number }
+
+function pointInLayoutRect(r: LayoutRect, p: { x: number; y: number }) {
+  return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h
+}
+
+function mapPointBetweenLayouts(
+  px: number,
+  py: number,
+  fromF: LayoutRect,
+  fromB: LayoutRect,
+  toF: LayoutRect,
+  toB: LayoutRect,
+): { x: number; y: number } {
+  if (pointInLayoutRect(fromF, { x: px, y: py })) {
+    return {
+      x: toF.x + ((px - fromF.x) / fromF.w) * toF.w,
+      y: toF.y + ((py - fromF.y) / fromF.h) * toF.h,
+    }
+  }
+  if (pointInLayoutRect(fromB, { x: px, y: py })) {
+    return {
+      x: toB.x + ((px - fromB.x) / fromB.w) * toB.w,
+      y: toB.y + ((py - fromB.y) / fromB.h) * toB.h,
+    }
+  }
+  const nx = fromF.w > 0 ? (px - fromF.x) / fromF.w : 0.5
+  const ny = fromF.h > 0 ? (py - fromF.y) / fromF.h : 0.5
+  return {
+    x: toF.x + clamp(nx, 0, 1) * toF.w,
+    y: toF.y + clamp(ny, 0, 1) * toF.h,
+  }
+}
+
+function remapBoardStateToLayout(fromF: LayoutRect, fromB: LayoutRect, toF: LayoutRect, toB: LayoutRect) {
+  state.value.markers = state.value.markers.map((m) => {
+    const p = mapPointBetweenLayouts(m.x, m.y, fromF, fromB, toF, toB)
+    return { ...m, x: p.x, y: p.y }
+  })
+  const remapPts = (pts: number[]) => {
+    const out = [...pts]
+    for (let i = 0; i < out.length; i += 2) {
+      const p = mapPointBetweenLayouts(out[i]!, out[i + 1]!, fromF, fromB, toF, toB)
+      out[i] = p.x
+      out[i + 1] = p.y
+    }
+    return out
+  }
+  state.value.lines = state.value.lines.map((ln) => ({ ...ln, points: remapPts(ln.points) }))
+  state.value.arrows = state.value.arrows.map((ar) => ({ ...ar, points: remapPts(ar.points) }))
+}
 
 function syncViewportZoom() {
   const z = zoom.value
@@ -268,33 +324,6 @@ function redraw() {
     }),
   )
 
-  for (const ln of state.value.lines) {
-    const line = new Konva.Line({
-      name: `line-${ln.id}`,
-      points: ln.points,
-      stroke: ln.stroke ?? '#ffffff',
-      strokeWidth: 3,
-      lineCap: 'round',
-      lineJoin: 'round',
-      listening: true,
-    })
-    viewportDraw.add(line)
-  }
-
-  for (const ar of state.value.arrows) {
-    const arrow = new Konva.Arrow({
-      name: `arrow-${ar.id}`,
-      points: ar.points,
-      stroke: ar.stroke ?? '#fbbf24',
-      fill: ar.stroke ?? '#fbbf24',
-      strokeWidth: 3,
-      pointerLength: 12,
-      pointerWidth: 12,
-      listening: true,
-    })
-    viewportDraw.add(arrow)
-  }
-
   for (const m of state.value.markers) {
     const g = new Konva.Group({
       x: m.x,
@@ -362,6 +391,71 @@ function redraw() {
     viewportDraw.add(g)
   }
 
+  const canDragVectors = auth.isAdmin && tool.value === 'select'
+
+  for (const ln of state.value.lines) {
+    const line = new Konva.Line({
+      name: `line-${ln.id}`,
+      points: ln.points,
+      stroke: ln.stroke ?? '#ffffff',
+      strokeWidth: 3,
+      lineCap: 'round',
+      lineJoin: 'round',
+      listening: true,
+      hitStrokeWidth: 16,
+    })
+    if (canDragVectors) {
+      line.draggable(true)
+      line.on('dragend', () => {
+        const dx = line.x()
+        const dy = line.y()
+        line.position({ x: 0, y: 0 })
+        if (dx === 0 && dy === 0) return
+        const pts = ln.points.slice()
+        for (let i = 0; i < pts.length; i += 2) {
+          pts[i] = (pts[i] ?? 0) + dx
+          pts[i + 1] = (pts[i + 1] ?? 0) + dy
+        }
+        snapshot()
+        state.value.lines = state.value.lines.map((l) => (l.id === ln.id ? { ...l, points: pts } : l))
+        redraw()
+      })
+    }
+    viewportDraw.add(line)
+  }
+
+  for (const ar of state.value.arrows) {
+    const arrow = new Konva.Arrow({
+      name: `arrow-${ar.id}`,
+      points: ar.points,
+      stroke: ar.stroke ?? '#fbbf24',
+      fill: ar.stroke ?? '#fbbf24',
+      strokeWidth: 3,
+      pointerLength: 12,
+      pointerWidth: 12,
+      listening: true,
+      hitStrokeWidth: 16,
+    })
+    if (canDragVectors) {
+      arrow.draggable(true)
+      arrow.on('dragend', () => {
+        const dx = arrow.x()
+        const dy = arrow.y()
+        arrow.position({ x: 0, y: 0 })
+        if (dx === 0 && dy === 0) return
+        const pts = ar.points.slice()
+        for (let i = 0; i < pts.length; i += 2) {
+          pts[i] = (pts[i] ?? 0) + dx
+          pts[i + 1] = (pts[i + 1] ?? 0) + dy
+        }
+        snapshot()
+        state.value.arrows = state.value.arrows.map((a) => (a.id === ar.id ? { ...a, points: pts } : a))
+        redraw()
+      })
+    }
+    viewportDraw.add(arrow)
+  }
+
   layerDraw.batchDraw()
 }
 
@@ -407,8 +501,27 @@ function fitStage() {
   )
   const gap = 10
   const fieldH = Math.max(220, fh - benchH - gap)
-  fieldRect = { x: fx, y: fy, w: fw, h: fieldH }
-  benchRect = { x: fx, y: fy + fieldH + gap, w: fw, h: Math.max(90, fh - fieldH - gap) }
+  const newField: LayoutRect = { x: fx, y: fy, w: fw, h: fieldH }
+  const newBench: LayoutRect = {
+    x: fx,
+    y: fy + fieldH + gap,
+    w: fw,
+    h: Math.max(90, fh - fieldH - gap),
+  }
+
+  const ref = state.value.layout_ref
+  if (ref && ref.field.w > 0 && ref.bench.w > 0) {
+    remapBoardStateToLayout(ref.field, ref.bench, newField, newBench)
+    state.value.layout_ref = { field: { ...newField }, bench: { ...newBench } }
+  } else if (prevRectsInitialized && prevFieldRect.w > 0 && prevBenchRect.w > 0) {
+    remapBoardStateToLayout(prevFieldRect, prevBenchRect, newField, newBench)
+    state.value.layout_ref = { field: { ...newField }, bench: { ...newBench } }
+  } else if (!ref && newField.w > 0) {
+    state.value.layout_ref = { field: { ...newField }, bench: { ...newBench } }
+  }
+
+  fieldRect = newField
+  benchRect = newBench
 
   const lineCol = 'rgba(255,255,255,0.72)'
   const lineSoft = 'rgba(255,255,255,0.55)'
@@ -589,6 +702,9 @@ function fitStage() {
   layoutBenchMarkers()
   enforceFieldCap()
   redraw()
+  prevFieldRect = { ...fieldRect }
+  prevBenchRect = { ...benchRect }
+  prevRectsInitialized = true
 }
 
 /** Coordenadas en el espacio del Stage (respeta zoom/posición). Necesario en móvil donde getRelativePointerPosition falla. */
@@ -746,13 +862,15 @@ function onStageDown(e: Konva.KonvaEventObject<MouseEvent | TouchEvent | Pointer
   }
 
   if (tool.value === 'erase') {
+    if (!layerDraw) return
     try {
       stage.setPointersPositions(e)
     } catch {
       /* */
     }
-    const posAbs = stage.getPointerPosition()
-    const hit = posAbs ? stage.getIntersection(posAbs) : null
+    const posLayer = layerDraw.getRelativePointerPosition()
+    if (!posLayer || !Number.isFinite(posLayer.x) || !Number.isFinite(posLayer.y)) return
+    const hit = layerDraw.getIntersection(posLayer)
     const nm = pickNameTarget(hit)
     if (!nm) return
     snapshot()
@@ -840,6 +958,7 @@ async function applyRemoteBoardRow(row: { updated_at: string; konva_json: unknow
   boardName.value = row.name
   state.value = parseBoard(row.konva_json)
   history.value = []
+  prevRectsInitialized = false
   await nextTick()
   initKonva()
   requestAnimationFrame(() => {
@@ -866,6 +985,7 @@ async function loadBoard() {
   boardName.value = data.name
   state.value = parseBoard(data.konva_json)
   history.value = []
+  prevRectsInitialized = false
   await nextTick()
   initKonva()
   requestAnimationFrame(() => {
@@ -904,6 +1024,10 @@ async function save() {
   if (!auth.isAdmin) return
   saving.value = true
   err.value = ''
+  state.value.layout_ref = {
+    field: { ...fieldRect },
+    bench: { ...benchRect },
+  }
   const { data, error } = await supabase
     .from('tactical_boards')
     .update({
